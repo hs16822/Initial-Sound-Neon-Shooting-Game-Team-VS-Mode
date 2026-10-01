@@ -171,11 +171,24 @@
     .vk-btn { background: rgba(255,255,255,0.1); border: 1px solid #aaa; color: #fff; padding: 12px 15px; border-radius: 5px; font-size: 18px; cursor: pointer; flex: 1; min-width: 35px; text-align: center;}
     .vk-btn:active { background: #fff; color: #000; }
     .action-btn { min-width: 80px; background: rgba(0, 210, 255, 0.2); border-color: #00d2ff; }
+
+    .panel-overlay { justify-content: flex-start; padding-top: 65px; touch-action: pan-y; }
+    .panel-overlay > * { flex-shrink: 0; }
+    body { -webkit-touch-callout: none; }
+    #fullscreen-btn { position: fixed; right: 10px; bottom: 12px; z-index: 400; background: #10182f; min-height: 44px; }
+    .voice-settings { width: 100%; display: flex; flex-wrap: wrap; gap: 14px; align-items: center; justify-content: center; padding: 12px; border: 1px solid #36536c; border-radius: 10px; }
+    .voice-settings label { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+    select { background: #15233a; color: white; padding: 10px; border: 1px solid #00d2ff; border-radius: 6px; font-size: 16px; max-width: 100%; }
+    input[type=range] { width: 160px; min-height: 44px; touch-action: pan-x; accent-color: #00d2ff; }
+    .note { font: 14px/1.6 sans-serif; color: #bdccda; text-align: center; width: 100%; margin: 4px 0; }
+    #leaderboard-list { overflow-wrap: anywhere; }
+    .name-display { min-width: 0; }
 </style>
 </head>
 <body>
 
 <div id="starfield"></div>
+<button id="fullscreen-btn" class="setting-btn" onclick="toggleFullscreen()">⛶ 全螢幕</button>
 
 <!-- 遊戲舞台 -->
 <div id="game-stage">
@@ -232,6 +245,20 @@
             </div>
         </div>
 
+        <div class="voice-settings">
+            <label for="speech-rate">語速 Speed <output id="rate-value">0.8×</output>
+                <input id="speech-rate" type="range" min="0.5" max="1.0" step="0.1" value="0.8" oninput="changeSpeechSettings()">
+            </label>
+            <label for="speech-accent">英文口音 Accent
+                <select id="speech-accent" onchange="changeSpeechSettings()">
+                    <option value="en-US">美國 US</option><option value="en-GB">英國 UK</option>
+                    <option value="en-AU">澳洲 AU</option><option value="en-NZ">紐西蘭 NZ</option>
+                    <option value="en-CA">加拿大 CA</option><option value="en-IE">愛爾蘭 IE</option>
+                </select>
+            </label>
+            <button class="setting-btn" id="voice-preview" onclick="previewVoice()">▶ 試聽</button>
+            <p class="note" id="voice-status" role="status"></p>
+        </div>
         <h2 style="width:100%;">Select Letters <button style="float:right; background:none; border:1px solid #00d2ff; color:#00d2ff; padding:2px 10px; border-radius:5px; cursor:pointer;" onclick="toggleAll()">All / None</button></h2>
         
         <div class="letter-grid" id="lobby-letters">
@@ -239,6 +266,9 @@
         </div>
         
         <button class="btn-neon" onclick="startGame()">START MISSION</button>
+        <button class="setting-btn" style="margin-top:16px" onclick="openLeaderboard()">🏆 查看排行榜</button>
+        <p class="note">排行榜自動保存在此瀏覽器，重新整理不會清除。僅按「清除排行榜」後刪除。顯示最高 7 筆成績。</p>
+        <p class="note storage-status" role="status"></p>
     </div>
 </div>
 
@@ -259,10 +289,12 @@
 <!-- 排行榜 -->
 <div id="leaderboard-screen" class="panel-overlay hidden">
     <h1>LEADERBOARD</h1>
+    <p class="note storage-status" role="status"></p>
+    <button class="setting-btn" onclick="clearLeaderboard()">清除排行榜 / Clear</button>
     <div id="leaderboard-list" style="width: 100%; max-width: 500px; margin: 20px 0; font-size: 20px;"></div>
     
     <div style="display:flex; gap:20px; flex-wrap:wrap; justify-content:center;">
-        <button class="btn-neon" onclick="playAgain()">PLAY AGAIN</button>
+        <button id="play-again-btn" class="btn-neon" onclick="playAgain()">PLAY AGAIN</button>
         <button class="btn-neon" style="border-color:#ff00de; color:#ff00de; box-shadow: 0 0 15px #ff00de;" onclick="showScreen('lobby-screen')">LOBBY</button>
     </div>
 </div>
@@ -325,28 +357,98 @@
         else if (type === 'wrong') { osc.type = 'sawtooth'; osc.frequency.setValueAtTime(150, now); osc.frequency.linearRampToValueAtTime(80, now+0.3); gain.gain.setValueAtTime(0.2, now); gain.gain.linearRampToValueAtTime(0, now+0.3); osc.start(now); osc.stop(now+0.3); }
     }
 
-    // 語音播放 3 次，間隔 0.8s
-    function speakCurrentTarget() {
-        if (!state.currentWord) return;
-        window.speechSynthesis.cancel();
-        
-        let wordText = state.currentWord.word;
-        
-        let playCount = 3;
-        function playChain() {
-            if(!state.isPlaying || !state.currentWord || state.currentWord.word !== wordText || playCount <= 0) return;
-            
-            let u = new SpeechSynthesisUtterance(wordText);
-            u.lang = 'en-US'; u.rate = 0.8; 
-            u.onend = () => {
-                if(playCount > 1) {
-                    setTimeout(() => { playCount--; playChain(); }, 800);
-                }
-            };
-            window.speechSynthesis.speak(u);
-        }
-        playChain();
+    const speech = window.speechSynthesis;
+    const speechOptions = { rate: 0.8, lang: 'en-US' };
+    let speechGeneration = 0;
+    let speechTimer;
+    function stopSpeech() {
+        speechGeneration++;
+        clearTimeout(speechTimer);
+        if (speech) speech.cancel();
     }
+    function chosenVoice() {
+        if (!speech) return null;
+        const voices = speech.getVoices();
+        const lang = v => v.lang.replace(/_/g, '-').toLowerCase();
+        return voices.find(v => lang(v) === speechOptions.lang.toLowerCase()) ||
+            voices.find(v => /^en(-|$)/.test(lang(v))) || null;
+    }
+    function refreshVoiceStatus() {
+        const status = document.getElementById('voice-status');
+        document.getElementById('voice-preview').disabled = !speech;
+        if (!speech) { status.textContent = '此瀏覽器不支援語音，請使用支援語音的瀏覽器。'; return; }
+        const voice = chosenVoice();
+        const exact = voice && voice.lang.replace(/_/g, '-').toLowerCase() === speechOptions.lang.toLowerCase();
+        status.textContent = exact ? '目前語音：' + voice.name + ' (' + voice.lang + ')' :
+            voice ? '此裝置沒有所選口音；暫用 ' + voice.name + ' (' + voice.lang + ')。可安裝對應英文語音後重新開啟。' :
+            '尚未取得英文語音清單，將請系統使用所選口音；實際口音依装置可用語音而定，請先試聽。';
+    }
+    function changeSpeechSettings() {
+        stopSpeech();
+        speechOptions.rate = Number(document.getElementById('speech-rate').value);
+        speechOptions.lang = document.getElementById('speech-accent').value;
+        document.getElementById('rate-value').textContent = speechOptions.rate.toFixed(1) + '×';
+        refreshVoiceStatus();
+    }
+    function makeUtterance(text) {
+        const u = new SpeechSynthesisUtterance(text);
+        const voice = chosenVoice();
+        u.lang = voice ? voice.lang : speechOptions.lang;
+        if (voice) u.voice = voice;
+        u.rate = speechOptions.rate;
+        u.onerror = e => {
+            if (e.error !== 'canceled' && e.error !== 'interrupted')
+                document.getElementById('voice-status').textContent = '語音播放失敗，請確認裝置語音與網路，或改選另一種口音後試聽。';
+        };
+        return u;
+    }
+    function previewVoice() {
+        if (!speech) return;
+        stopSpeech(); refreshVoiceStatus();
+        speech.speak(makeUtterance('Apple. Dog. Zebra.'));
+    }
+    // 每題播放三次；取消舊的重播排程，避免換題／快速重播時重疊。
+    function speakCurrentTarget() {
+        stopSpeech();
+        if (!speech || !state.currentWord || !state.isPlaying) return;
+        const generation = speechGeneration;
+        const word = state.currentWord.word;
+        let remaining = 3;
+        function play() {
+            if (generation !== speechGeneration || !state.isPlaying || state.currentWord.word !== word) return;
+            const u = makeUtterance(word);
+            u.onend = () => {
+                if (generation === speechGeneration && --remaining > 0) speechTimer = setTimeout(play, 800);
+            };
+            speech.speak(u);
+        }
+        play();
+    }
+    if (speech) speech.addEventListener('voiceschanged', refreshVoiceStatus);
+
+    document.addEventListener('contextmenu', e => e.preventDefault());
+    async function toggleFullscreen() {
+        try {
+            if (document.fullscreenElement || document.webkitFullscreenElement) {
+                const exit = document.exitFullscreen || document.webkitExitFullscreen;
+                if (exit) await exit.call(document);
+            } else {
+                const root = document.documentElement;
+                const enter = root.requestFullscreen || root.webkitRequestFullscreen;
+                if (!enter) { alert('此瀏覽器不支援網頁全螢幕，請使用瀏覽器的全螢幕功能。'); return; }
+                await enter.call(root);
+            }
+            updateFullscreenButton();
+        } catch (e) { alert('無法進入全螢幕，請在獨立瀏覽器視窗開啟此 HTML 後再試。'); }
+    }
+    function updateFullscreenButton() {
+        const active = !!(document.fullscreenElement || document.webkitFullscreenElement);
+        const btn = document.getElementById('fullscreen-btn');
+        btn.textContent = active ? '⛶ 離開全螢幕' : '⛶ 全螢幕';
+        btn.setAttribute('aria-pressed', String(active));
+    }
+    document.addEventListener('fullscreenchange', updateFullscreenButton);
+    document.addEventListener('webkitfullscreenchange', updateFullscreenButton);
 
     // --- 大廳 UI ---
     function initLobby() {
@@ -423,13 +525,16 @@
             if(state.activePool.length === 0) return;
         }
 
+        scoresSubmitted = false;
+        stopSpeech();
         showScreen('ui-layer');
         document.getElementById('zone-2').style.display = state.mode === 2 ? 'block' : 'none';
         document.getElementById('hud-2').style.display = state.mode === 2 ? 'flex' : 'none';
 
-        players[1] = { active: true, score: 0, hp: 5, status: 'playing', name: players[1].name, alienHits: 0, aliensEnabled: true, lastDrop: 0 };
-        players[2] = { active: state.mode===2, score: 0, hp: 5, status: 'playing', name: players[2].name, alienHits: 0, aliensEnabled: true, lastDrop: 0 };
+        players[1] = { active: true, score: 0, hp: 5, status: 'playing', name: "", alienHits: 0, aliensEnabled: true, lastDrop: 0 };
+        players[2] = { active: state.mode===2, score: 0, hp: 5, status: 'playing', name: "", alienHits: 0, aliensEnabled: true, lastDrop: 0 };
         
+        focusInput(1); updateNameDisp();
         document.querySelectorAll('.player-base').forEach(b => b.classList.remove('dead'));
         document.querySelectorAll('.zone-overlay').forEach(o => o.style.opacity = 0);
         enemies.forEach(e => e.el.remove()); enemies = [];
@@ -524,6 +629,7 @@
         el.style.left = x + 'px'; el.style.top = startY + 'px';
 
         const shootHandler = (e) => {
+            if (e.type === 'mousedown' && e.button !== 0) return;
             e.preventDefault(); e.stopPropagation();
             if(players[pId].status === 'playing') executeShot(pId, el, type, val, x, parseFloat(el.style.top));
         };
@@ -698,7 +804,7 @@
     }
 
     function gameOver() {
-        state.isPlaying = false; window.speechSynthesis.cancel();
+        state.isPlaying = false; stopSpeech();
         clearInterval(timerId); cancelAnimationFrame(gameLoopId);
         showScreen('game-over-screen');
         
@@ -710,22 +816,63 @@
         focusInput(1); updateNameDisp();
     }
 
-    function submitScores() {
-        let lb = JSON.parse(localStorage.getItem('neonAlphaLB') || '[]');
-        if(players[1].name==="") players[1].name = "P1";
-        lb.push({ name: players[1].name, score: players[1].score });
-        
-        if(state.mode === 2) {
-            if(players[2].name==="") players[2].name = "P2";
-            lb.push({ name: players[2].name, score: players[2].score });
-        }
-
-        lb.sort((a,b) => b.score - a.score); lb = lb.slice(0, 7);
-        localStorage.setItem('neonAlphaLB', JSON.stringify(lb));
-        
+    const leaderboardKey = 'neonAlphaLB';
+    let memoryLeaderboard = [];
+    let scoresSubmitted = false;
+    function storageMessage(message) {
+        document.querySelectorAll('.storage-status').forEach(el => el.textContent = message);
+    }
+    function readLeaderboard() {
+        try {
+            const data = JSON.parse(localStorage.getItem(leaderboardKey) || '[]');
+            if (!Array.isArray(data)) throw new Error('Invalid leaderboard');
+            memoryLeaderboard = data.filter(r => r && typeof r.name === 'string' && Number.isFinite(r.score));
+            storageMessage('成績保存在此瀏覽器；請使用同一檔案與瀏覽器開啟。');
+        } catch (e) { storageMessage('無法讀取本機紀錄，目前僅保留本次開啟的成績。'); }
+        return [...memoryLeaderboard];
+    }
+    function writeLeaderboard(lb) {
+        memoryLeaderboard = lb;
+        try {
+            localStorage.setItem(leaderboardKey, JSON.stringify(lb));
+            storageMessage('已儲存在此瀏覽器，重新整理仍會保留。');
+        } catch (e) { storageMessage('瀏覽器無法儲存：目前成績僅保留至此頁關閉，請確認瀏覽器儲存設定。'); }
+    }
+    function renderLeaderboard(lb) {
+        const list = document.getElementById('leaderboard-list'); list.replaceChildren();
+        if (!lb.length) { list.textContent = '尚無成績 / No scores yet'; return; }
+        lb.sort((a,b) => b.score - a.score).slice(0,7).forEach((r,i) => {
+            const row = document.createElement('div');
+            row.style.cssText = 'display:flex;justify-content:space-between;gap:20px;padding:10px;border-bottom:1px dashed #555;';
+            const name = document.createElement('span'); name.textContent = (i+1) + '. ' + r.name;
+            const score = document.createElement('span'); score.textContent = r.score; score.style.color = '#00ff9d';
+            row.append(name, score); list.appendChild(row);
+        });
+    }
+    function openLeaderboard(lb) {
+        stopSpeech();
+        renderLeaderboard(lb || readLeaderboard());
+        document.getElementById('play-again-btn').classList.toggle('hidden', !scoresSubmitted);
         showScreen('leaderboard-screen');
-        const list = document.getElementById('leaderboard-list'); list.innerHTML = '';
-        lb.forEach((r, i) => { list.innerHTML += `<div style="display:flex; justify-content:space-between; padding:10px; border-bottom:1px dashed #555;"><span>${i+1}. ${r.name}</span><span style="color:#00ff9d;">${r.score}</span></div>`; });
+    }
+    function clearLeaderboard() {
+        if (!confirm('確定清除全部排行榜紀錄？此操作無法復原。')) return;
+        try {
+            localStorage.removeItem(leaderboardKey);
+            memoryLeaderboard = [];
+            storageMessage('排行榜已清除。之後的新成績會繼續自動儲存。');
+            renderLeaderboard([]);
+        } catch (e) { storageMessage('無法清除本機紀錄，請確認瀏覽器儲存權限後再試。'); }
+    }
+    function submitScores() {
+        if (scoresSubmitted || state.isPlaying) return;
+        let lb = readLeaderboard();
+        lb.push({ name: players[1].name.trim() || 'P1', score: players[1].score });
+        if (state.mode === 2) lb.push({ name: players[2].name.trim() || 'P2', score: players[2].score });
+        lb.sort((a,b) => b.score - a.score); lb = lb.slice(0,7);
+        writeLeaderboard(lb);
+        scoresSubmitted = true;
+        openLeaderboard(lb);
     }
 
     function initStars() {
@@ -735,7 +882,7 @@
         }
     }
     
-    initStars(); initLobby(); initKeyboard();
+    initStars(); initLobby(); initKeyboard(); refreshVoiceStatus(); readLeaderboard();
 </script>
 </body>
 </html>
